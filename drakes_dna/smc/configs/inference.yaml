@@ -1,0 +1,30 @@
+hydra:
+  searchpath:
+    - file://configs_gosai
+  run:
+    dir: ./outputs_SMC/${smc.proposal_type}_${smc.num_particles}_${smc.kl_weight}_${smc.resampling.frequency}_${smc.phi}/${now:%Y.%m.%d}/${now:%H%M%S}
+  job:
+    chdir: true
+
+defaults:
+  - config_gosai
+  - _self_
+
+smc:
+  resampling:
+    ess_threshold: 0.5
+    partial: False
+    frequency: 10
+  phi: 4
+  tau: 1.0
+  kl_weight: 0.2
+  num_inference_steps: 100
+  batches: 1
+  num_particles: 8
+  batch_p: 4096
+  lambda_tempering:
+    enabled: True
+    one_at: 100
+  proposal_type: "locally_optimal"
+  use_continuous_formulation: True
+  final_strategy: "argmax_rewards"
