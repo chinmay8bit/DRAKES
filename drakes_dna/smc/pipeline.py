@@ -88,8 +88,8 @@ class Pipeline:
                 propgate_locally_optimal()
             # elif proposal_type == "straight_through_gradients":
             #     propagate_straight_through_gradients()
-            # elif proposal_type == "reverse":
-            #     propagate_reverse()
+            elif proposal_type == "reverse":
+                propagate_reverse()
             # elif proposal_type == "without_SMC":
             #     propagate_without_SMC()
             else:
@@ -188,6 +188,79 @@ class Pipeline:
                 sched_out.log_prob_diffusion,
             )
             
+        def propagate_reverse():
+            nonlocal log_w, latents, logits, rewards, log_twist
+            log_twist_prev = log_twist.clone()
+            for j in range(0, total_particles, batch_p):
+                latents_batch = latents[j:j+batch_p]
+                with torch.no_grad():
+                    tmp_logits = self.model.get_logits(latents_batch, t[j:j+batch_p])
+                    
+                    tmp_rewards = torch.zeros(latents_batch.size(0), phi, device=self._execution_device)
+                    tmp_logp_x0 = self.model._subs_parameterization(tmp_logits, latents_batch)
+                    for phi_i in range(phi):
+                        sample = F.gumbel_softmax(tmp_logp_x0, tau=tau, hard=True)
+                        tmp_rewards[:, phi_i] = reward_fn(sample)
+                    tmp_rewards = logmeanexp(tmp_rewards * scale_cur, dim=-1) / scale_cur
+                
+                logits[j:j+batch_p] = tmp_logits.detach()
+                rewards[j:j+batch_p] = tmp_rewards.detach()
+                log_twist[j:j+batch_p] = rewards[j:j+batch_p] * scale_cur
+                
+            if verbose:
+                print("Rewards: ", rewards)
+            
+            # Calculate weights
+            incremental_log_w = (log_twist - log_twist_prev)
+            log_w += incremental_log_w
+            
+            # Now reshape log_w to (batches, num_particles)
+            log_w = log_w.reshape(batches, num_particles)
+            
+            if verbose:
+                print("log_twist - log_twist_prev:", log_twist - log_twist_prev)
+                print("Incremental log weights: ", incremental_log_w)
+                print("Log weights: ", log_w)
+                print("Normalized weights: ", normalize_weights(log_w, dim=-1))
+            
+            # Resample particles
+            if verbose:
+                print(f"ESS: ", compute_ess_from_log_w(log_w, dim=-1))
+            
+            if resample_condition:
+                resample_indices = []
+                log_w_new = []
+                is_resampled = False
+                for batch in range(batches):
+                    resample_indices_batch, is_resampled_batch, log_w_batch = resample_fn(log_w[batch])
+                    resample_indices.append(resample_indices_batch + batch * num_particles)
+                    log_w_new.append(log_w_batch)
+                    is_resampled = is_resampled or is_resampled_batch
+                    
+                resample_indices = torch.cat(resample_indices, dim=0)
+                log_w = torch.cat(log_w_new, dim=0)
+                    
+                if is_resampled:
+                    latents = latents[resample_indices]
+                    logits = logits[resample_indices]
+                    rewards = rewards[resample_indices]
+                    log_twist = log_twist[resample_indices]
+                    
+                if verbose:
+                    print("Resample indices: ", resample_indices)
+                
+            if log_w.ndim == 2:
+                log_w = log_w.reshape(total_particles)
+
+            
+            # Propose new particles
+            sched_out = self.scheduler.step(
+                latents=latents,
+                logits=logits,
+                t=t,
+                next_t=t-dt,
+            )
+            latents = sched_out.new_latents
               
         bar = enumerate(reversed(range(num_inference_steps)))
         if not disable_progress_bar:
