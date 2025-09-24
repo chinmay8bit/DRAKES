@@ -90,8 +90,8 @@ class Pipeline:
             #     propagate_straight_through_gradients()
             elif proposal_type == "reverse":
                 propagate_reverse()
-            # elif proposal_type == "without_SMC":
-            #     propagate_without_SMC()
+            elif proposal_type == "without_SMC":
+                propagate_without_SMC()
             else:
                 raise NotImplementedError(f"Proposal type {proposal_type} is not implemented.")
             
@@ -252,6 +252,23 @@ class Pipeline:
             if log_w.ndim == 2:
                 log_w = log_w.reshape(total_particles)
 
+            
+            # Propose new particles
+            sched_out = self.scheduler.step(
+                latents=latents,
+                logits=logits,
+                t=t,
+                next_t=t-dt,
+            )
+            latents = sched_out.new_latents
+        
+        def propagate_without_SMC():
+            nonlocal latents, logits
+            for j in range(0, total_particles, batch_p):
+                latents_batch = latents[j:j+batch_p]
+                with torch.no_grad():
+                    tmp_logits = self.model.get_logits(latents_batch, t[j:j+batch_p])    
+                logits[j:j+batch_p] = tmp_logits.detach()
             
             # Propose new particles
             sched_out = self.scheduler.step(
