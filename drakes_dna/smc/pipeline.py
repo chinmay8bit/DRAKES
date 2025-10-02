@@ -50,6 +50,8 @@ class Pipeline:
         phi: int = 1, # number of samples for reward approximation
         tau: float = 1.0, # temperature for taking x0 samples
         proposal_type:str = "locally_optimal",
+        ft_model: Optional[diffusion_gosai_update.Diffusion] = None, # needs to supplied if proposal_type is ft_model
+        use_ft_model_for_expected_reward: bool = False, # Whether to use the forward model for expected reward
         use_continuous_formulation: bool = False, # Whether to use a continuous formulation of carry over unmasking
         disable_progress_bar: bool = False,
         final_strategy="argmax_rewards",
@@ -76,6 +78,7 @@ class Pipeline:
         
         # 5. Set SMC variables
         logits = torch.zeros((*latents.shape, vocab_size), device=self._execution_device)
+        logits_ft_model = torch.zeros((*latents.shape, vocab_size), device=self._execution_device)
         rewards = torch.zeros((total_particles,), device=self._execution_device)
         rewards_grad = torch.zeros((*latents.shape, vocab_size), device=self._execution_device)
         log_twist = torch.zeros((total_particles, ), device=self._execution_device)
@@ -92,6 +95,8 @@ class Pipeline:
                 propagate_reverse()
             elif proposal_type == "without_SMC":
                 propagate_without_SMC()
+            elif proposal_type == "ft_model":
+                propagate_ft_model()
             else:
                 raise NotImplementedError(f"Proposal type {proposal_type} is not implemented.")
             
@@ -278,7 +283,96 @@ class Pipeline:
                 next_t=t-dt,
             )
             latents = sched_out.new_latents
-              
+            
+        def propagate_ft_model():
+            assert ft_model is not None, f"ft_model must be provided for proposal_type={proposal_type}."
+            nonlocal log_w, latents, log_prob_proposal, log_prob_diffusion, logits, logits_ft_model, rewards, log_twist
+            log_twist_prev = log_twist.clone()
+            for j in range(0, total_particles, batch_p):
+                latents_batch = latents[j:j+batch_p]
+                with torch.no_grad():
+                    tmp_logits = self.model.get_logits(latents_batch, t[j:j+batch_p])
+                    tmp_logits_ft_model = ft_model.get_logits(latents_batch, t[j:j+batch_p])
+                    
+                    tmp_rewards = torch.zeros(latents_batch.size(0), phi, device=self._execution_device)
+                    if use_ft_model_for_expected_reward:
+                        tmp_logp_x0 = ft_model._subs_parameterization(tmp_logits_ft_model, latents_batch)
+                    else:
+                        tmp_logp_x0 = self.model._subs_parameterization(tmp_logits, latents_batch)
+                    for phi_i in range(phi):
+                        sample = F.gumbel_softmax(tmp_logp_x0, tau=tau, hard=True)
+                        tmp_rewards[:, phi_i] = reward_fn(sample)
+                    tmp_rewards = logmeanexp(tmp_rewards * scale_cur, dim=-1) / scale_cur
+                
+                logits[j:j+batch_p] = tmp_logits.detach()
+                logits_ft_model[j:j+batch_p] = tmp_logits_ft_model.detach()
+                rewards[j:j+batch_p] = tmp_rewards.detach()
+                log_twist[j:j+batch_p] = rewards[j:j+batch_p] * scale_cur
+                
+            if verbose:
+                print("Rewards: ", rewards)
+            
+            # Calculate weights
+            incremental_log_w = (log_prob_diffusion - log_prob_proposal) + (log_twist - log_twist_prev)
+            log_w += incremental_log_w
+            
+            # Now reshape log_w to (batches, num_particles)
+            log_w = log_w.reshape(batches, num_particles)
+            
+            if verbose:
+                print("log_prob_diffusion - log_prob_proposal: ", log_prob_diffusion - log_prob_proposal)
+                print("log_twist - log_twist_prev:", log_twist - log_twist_prev)
+                print("Incremental log weights: ", incremental_log_w)
+                print("Log weights: ", log_w)
+                print("Normalized weights: ", normalize_weights(log_w, dim=-1))
+            
+            # Resample particles
+            if verbose:
+                print(f"ESS: ", compute_ess_from_log_w(log_w, dim=-1))
+            
+            if resample_condition:
+                resample_indices = []
+                log_w_new = []
+                is_resampled = False
+                for batch in range(batches):
+                    resample_indices_batch, is_resampled_batch, log_w_batch = resample_fn(log_w[batch])
+                    resample_indices.append(resample_indices_batch + batch * num_particles)
+                    log_w_new.append(log_w_batch)
+                    is_resampled = is_resampled or is_resampled_batch
+                    
+                resample_indices = torch.cat(resample_indices, dim=0)
+                log_w = torch.cat(log_w_new, dim=0)
+                    
+                if is_resampled:
+                    latents = latents[resample_indices]
+                    logits = logits[resample_indices]
+                    logits_ft_model = logits_ft_model[resample_indices]
+                    rewards = rewards[resample_indices]
+                    log_twist = log_twist[resample_indices]
+                    
+                if verbose:
+                    print("Resample indices: ", resample_indices)
+                
+            if log_w.ndim == 2:
+                log_w = log_w.reshape(total_particles)
+
+            
+            # Propose new particles
+            approx_guidance = logits_ft_model - logits # this effectively makes logits_ft_model the proposal distribution
+            approx_guidance[..., self.model.mask_index] = 0.0 # avoid nan due to (inf - inf)
+            sched_out = self.scheduler.step_with_approx_guidance(
+                latents=latents,
+                logits=logits,
+                approx_guidance=approx_guidance, 
+                t=t,
+                next_t=t-dt,
+            )
+            latents, log_prob_proposal, log_prob_diffusion = (
+                sched_out.new_latents,
+                sched_out.log_prob_proposal,
+                sched_out.log_prob_diffusion,
+            )
+        
         bar = enumerate(reversed(range(num_inference_steps)))
         if not disable_progress_bar:
             bar = tqdm(bar, leave=False)

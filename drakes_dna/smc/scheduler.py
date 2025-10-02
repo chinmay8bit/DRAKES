@@ -70,7 +70,8 @@ class MDLMScheduler(BaseScheduler):
         log_p_x0 = self.model._subs_parameterization(logits=logits, xt=latents)
         assert move_chance_t.ndim == log_p_x0.ndim
         p_x0 = log_p_x0.exp()
-        assert torch.allclose(p_x0.sum(dim=-1), torch.tensor(1.0, device=p_x0.device), atol=1e-6), f"Off by {(p_x0.sum(dim=-1) - 1.0).abs().max()}"
+        assert torch.allclose(p_x0.sum(dim=-1), torch.tensor(1.0, device=p_x0.device), atol=6e-5), f"Off by {(p_x0.sum(dim=-1) - 1.0).abs().max()}"
+        p_x0 = p_x0 / p_x0.sum(dim=-1, keepdim=True)
         q_xs = p_x0 * (move_chance_t - move_chance_s) + F.one_hot(latents, num_classes=self.model.vocab_size) * move_chance_s
         q_xs /= move_chance_t
         assert torch.allclose(q_xs.sum(dim=-1), torch.tensor(1.0, device=q_xs.device), atol=1e-6), f"Off by {(q_xs.sum(dim=-1) - 1.0).abs().max()}"

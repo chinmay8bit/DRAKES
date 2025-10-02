@@ -63,6 +63,7 @@ def main(config):
         phi=config.smc.phi,
         tau=config.smc.tau,
         final_strategy=config.smc.final_strategy,
+        verbose=False,
     )
     print(samples.shape)
     print(samples)
