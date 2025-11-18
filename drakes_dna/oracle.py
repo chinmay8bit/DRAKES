@@ -12,7 +12,7 @@ from scipy.linalg import sqrtm
 from scipy.stats import pearsonr
 import torch.nn.functional as F
 
-base_path = '/data/scratch/wangchy/seqft/'
+base_path = '/home/zo122/CHINMAY/papers_with_code/DRAKES/data_and_model'
 
 
 def get_gosai_oracle(mode='train'):

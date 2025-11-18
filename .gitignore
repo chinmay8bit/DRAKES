@@ -1,2 +1,10 @@
 data_and_model
 data_and_model.zip
+venv/
+drakes_dna/log_variance_ft/model_weights
+__pycache__/
+drakes_dna/outputs_SMC/
+drakes_dna/logs_test_SMC/
+wandb*
+model_weights*
+logs*

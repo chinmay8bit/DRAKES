@@ -263,12 +263,16 @@ class Diffusion(L.LightningModule):
     assert sigma.ndim == 1, sigma.shape
     return sigma
 
-  def forward(self, x, sigma):
+  def forward(self, x, sigma, return_raw_logits=False):
     """Returns log score."""
     sigma = self._process_sigma(sigma)
 
     with torch.cuda.amp.autocast(dtype=torch.float32):
       logits = self.backbone(x, sigma)
+    
+    if return_raw_logits:
+      return logits
+      
     if self.parameterization == 'subs':
       return self._subs_parameterization(logits=logits,
                                          xt=x)
@@ -548,6 +552,39 @@ class Diffusion(L.LightningModule):
         logits = self.forward(x, unet_conditioning)
         x = logits[:, :, :-1].argmax(dim=-1)
     return x
+  
+  def _sample_step(self, x, t, dt):
+    sigma_t, _ = self.noise(t)
+    sigma_s, _ = self.noise(t - dt)
+    if sigma_t.ndim > 1:
+      sigma_t = sigma_t.squeeze(-1)
+    if sigma_s.ndim > 1:
+      sigma_s = sigma_s.squeeze(-1)
+    assert sigma_t.ndim == 1, sigma_t.shape
+    assert sigma_s.ndim == 1, sigma_s.shape
+    move_chance_t = 1 - torch.exp(-sigma_t) # t
+    move_chance_s = 1 - torch.exp(-sigma_s)
+    move_chance_t = move_chance_t[:, None, None]
+    move_chance_s = move_chance_s[:, None, None]
+    unet_conditioning = sigma_t
+    log_p_x0 = self.forward(x, unet_conditioning)
+    assert move_chance_t.ndim == log_p_x0.ndim
+    p_x0 = log_p_x0.exp()
+    assert torch.allclose(p_x0.sum(dim=-1), torch.tensor(1.0, device=p_x0.device), atol=1e-6), f"Off by {(p_x0.sum(dim=-1) - 1.0).abs().max()}"
+    q_xs = p_x0 * (move_chance_t - move_chance_s) + F.one_hot(x, num_classes=self.vocab_size) * move_chance_s
+    q_xs /= move_chance_t
+    assert torch.allclose(q_xs.sum(dim=-1), torch.tensor(1.0, device=q_xs.device), atol=1e-6), f"Off by {(q_xs.sum(dim=-1) - 1.0).abs().max()}"
+    return q_xs, p_x0
+  
+  def get_logits(self, x, t):
+    sigma_t, _ = self.noise(t)
+    if sigma_t.ndim > 1:
+        sigma_t = sigma_t.squeeze(-1)
+    assert sigma_t.ndim == 1, sigma_t.shape
+    unet_conditioning = sigma_t
+    log_p_x0: torch.Tensor = self.forward(x, unet_conditioning, return_raw_logits=True)
+    log_p_x0[..., self.mask_index]  = -torch.inf # type: ignore
+    return log_p_x0.float()
   
   def _ddpm_update_finetune_gradient(self, x, t, dt, copy_flag_temp, return_process=False):
     
